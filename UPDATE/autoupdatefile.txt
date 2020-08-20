@@ -1,0 +1,148 @@
+import java.io.File;
+import java.io.IOException;
+import java.lang.ProcessBuilder.Redirect;
+import java.lang.reflect.Method;
+import java.net.URL;
+import java.net.URLClassLoader;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.List;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.jar.Attributes;
+import java.util.jar.Manifest;
+
+
+public class Launcher {
+
+    public static void main(String[] args) {
+        new Launcher().run(new ArrayList<>(Arrays.asList(args)));
+    }
+
+    private void run(List<String> list) {
+        final String jar = removeArgPairOrNull("-jar", list);
+        final boolean runonce = removeArgSingle("-runonce", list);
+        final String batchfile = removeArgPairOrNull("-run", list);
+
+        if (jar == null) {
+            System.out.println("Please add -jar [jarfile]");
+            System.out.println("All other arguments will be passed to the jar main class.");
+            System.out.println("To prevent reloading, add the argument to -runonce");
+            System.out.println("To provide another program that runs before a reload, add -run [file]");
+        }
+
+        boolean reload;
+
+        do {
+            reload = launch(list.toArray(new String[0]), new String(jar), new String(batchfile), new Boolean(runonce));
+            System.out.println("Launcher: reload is: " + reload);
+
+            gc();
+
+            if (reload && batchfile != null) {
+                try {
+                    System.err.println("Launcher: will attempt to reload jar: " + jar);
+                    runBatchFile(batchfile);
+                } catch (IOException | InterruptedException ex) {
+                    ex.printStackTrace(System.err);
+                    System.err.println("Launcher: reload batchfile had exception:" + ex);
+                    reload = false;
+                }
+            }
+
+        } while (reload);
+
+    }
+
+    private boolean launch(String[] args, String jar, String batchfile, boolean runonce) {
+
+        Class<?> clazz = null;
+        URLClassLoader urlClassLoader = null;
+        boolean reload = false;
+
+        try {
+            urlClassLoader = new URLClassLoader(new URL[]{new File(jar).toURI().toURL()});
+
+            String mainClass = findMainClass(urlClassLoader);
+            clazz = Class.forName(mainClass, true, urlClassLoader);
+
+            Method main = clazz.getMethod("main", String[].class);
+            System.err.println("Launcher: have method: " + main);
+
+            Method reloadMethod;
+
+            if (runonce) {
+                // invoke main method using reflection.
+                main.invoke(null, (Object) args);
+            } else {
+                // find main and reload methods and invoke using reflection.
+                reloadMethod = clazz.getMethod("reload");
+
+                main.invoke(null, (Object) args);
+                System.err.println("Launcher: invoked: " + main);
+
+                reload = (Boolean) reloadMethod.invoke(null, new Object[0]);
+            }
+        } catch (final Exception ex) {
+            ex.printStackTrace(System.err);
+            System.err.println("Launcher: can not launch and reload this class:" + ex);
+            System.err.println("> " + clazz);
+            reload = false;
+        } finally {
+            if (urlClassLoader != null) {
+                try {
+                    urlClassLoader.close();
+                } catch (IOException ex) {
+                    ex.printStackTrace(System.err);
+                    System.err.println("Launcher: error closing classloader: " + ex);
+                }
+            }
+        }
+
+        return reload ? true : false;
+    }
+
+    private static String findMainClass(URLClassLoader urlClassLoader) throws IOException {
+        URL url = urlClassLoader.findResource("META-INF/MANIFEST.MF");
+        Manifest manifest = new Manifest(url.openStream());
+        Attributes attr = manifest.getMainAttributes();
+        return attr.getValue("Main-Class");
+    }
+
+    private static void runBatchFile(String batchfile) throws IOException, InterruptedException {
+        System.out.println("Launcher: executng batchfile: " + batchfile);
+        ProcessBuilder pb = new ProcessBuilder("cmd", "/C", batchfile);
+        pb.redirectErrorStream(true);
+        pb.redirectInput(Redirect.INHERIT);
+        pb.redirectOutput(Redirect.INHERIT);
+        Process p = pb.start();
+        p.waitFor();
+    }
+
+    private static String removeArgPairOrNull(String arg, List<String> list) {
+        if (list.contains(arg)) {
+            int index = list.indexOf(arg);
+            list.remove(index);
+            return list.remove(index);
+        }
+        return null;
+    }
+
+    private static boolean removeArgSingle(String arg, List<String> list) {
+        if (list.contains(arg)) {
+            list.remove(list.indexOf(arg));
+            return true;
+        }
+        return false;
+    }
+
+    private void gc() {
+        for (int i = 0; i < 10; i++) {
+            byte[] bytes = new byte[1024];
+            Arrays.fill(bytes, (byte) 1);
+            bytes = null;
+            System.gc();
+            System.runFinalization();
+        }
+    }
+
+}
